@@ -14,6 +14,7 @@
     "cors": "^2.8.6",
     "dotenv": "^17.4.0",
     "express": "^5.2.1",
-    "iyzipay": "^2.0.67"
+    "iyzipay": "^2.0.67",
+    "nodemailer": "^8.0.4"
   }
 }

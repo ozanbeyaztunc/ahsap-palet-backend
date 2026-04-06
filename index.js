@@ -2,6 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const Iyzipay = require('iyzipay');
+const nodemailer = require('nodemailer');
 
 const app = express();
 
@@ -16,8 +17,9 @@ app.use(cors({
     ]
 }));
 
-// Gelen JSON verilerini okuyabilmek için
+// Gelen POST/JSON verilerini okuyabilmek için
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
 // Iyzico Ayarları
 const iyzipay = new Iyzipay({
@@ -40,9 +42,8 @@ app.post('/api/payment', (req, res) => {
         return res.status(400).json({ error: "Lütfen ürün adı ve toplam tutar bilgilerini gönderin." });
     }
 
-    // Site canlıdaysa canlı link, test ortamındaysa localhost linkine dönsün diye dinamikleştirildi.
-    const origin = req.headers.origin || "https://palettedarikcisi.com";
-    const callbackUrl = `${origin}/basarili`;
+    // Iyzico bu urlye POST atacak. Dönüş adresi kendi backendimiz olmalı.
+    const callbackUrl = (process.env.BACKEND_URL || "https://ahsap-palet-backend-saod.onrender.com") + "/api/payment/callback";
 
     const request = {
         locale: Iyzipay.LOCALE.TR,
@@ -105,6 +106,74 @@ app.post('/api/payment', (req, res) => {
         res.status(200).json({ 
             paymentUrl: result.paymentPageUrl + "&token=" + result.token 
         });
+    });
+});
+
+// --- İYZİCO ÖDEME SONUCU (CALLBACK) ENDPOINT'İ ---
+app.post('/api/payment/callback', (req, res) => {
+    const token = req.body.token;
+    const frontendUrl = process.env.FRONTEND_URL || "https://palettedarikcisi.com";
+
+    if (!token) {
+        return res.redirect(frontendUrl + "/basarisiz");
+    }
+
+    // Token ile İyziCo'dan sipariş sonucunu alıyoruz
+    iyzipay.checkoutForm.retrieve({
+        locale: Iyzipay.LOCALE.TR,
+        token: token
+    }, function (err, result) {
+        if (err || result.status === 'failure' || result.paymentStatus !== 'SUCCESS') {
+            console.error("Ödeme onaylanmadı veya hata oluştu:", result?.errorMessage || err);
+            return res.redirect(frontendUrl + "/basarisiz");
+        }
+
+        // --- ÖDEME BAŞARILI: E-POSTA BİLDİRİMİ GÖNDER ---
+        const transporter = nodemailer.createTransport({
+            host: process.env.SMTP_HOST || "mail.palettedarikcisi.com",
+            port: process.env.SMTP_PORT || 465,
+            secure: process.env.SMTP_SECURE !== 'false', // 465 ise true
+            auth: {
+                user: process.env.EMAIL_USER,
+                pass: process.env.EMAIL_PASS
+            }
+        });
+
+        // İyziCo'dan gelen sepet içeriğini (itemTransactions) okutalım
+        let urunler = "Bilinmiyor";
+        if (result.itemTransactions && result.itemTransactions.length > 0) {
+            urunler = result.itemTransactions.map(item => `${item.name} (${item.paidPrice} TL)`).join('\n- ');
+        }
+
+        const mailOptions = {
+            from: process.env.EMAIL_USER, // Gönderen aynı mail olmalı (kimlik doğrulama için)
+            to: process.env.EMAIL_USER,   // Alıcı da siz (bildirim)
+            subject: '📦 YENİ SİPARİŞ GELDİ! (Palet Tedarikçisi)',
+            text: `Web sitenizden yeni bir sipariş ve başarılı ödeme aldınız!\n\n` +
+                  `MÜŞTERİ BİLGİLERİ:\n` +
+                  `-------------------\n` +
+                  `Ad Soyad: ${result.buyer?.name} ${result.buyer?.surname}\n` +
+                  `Telefon: ${result.buyer?.gsmNumber}\n` +
+                  `E-Posta: ${result.buyer?.email}\n` +
+                  `Teslimat Adresi: ${result.shippingAddress?.address}, ${result.shippingAddress?.city} - ${result.shippingAddress?.zipCode}\n\n` +
+                  `SİPARİŞ DETAYI:\n` +
+                  `-------------------\n` +
+                  `Sipariş Numarası (Iyzico): ${result.paymentId || result.conversationId}\n` +
+                  `Toplam Ödenen: ${result.paidPrice} TL\n\n` +
+                  `ALINAN ÜRÜNLER:\n` +
+                  `- ${urunler}`
+        };
+
+        transporter.sendMail(mailOptions, (mailErr, info) => {
+            if (mailErr) {
+                console.error("Mail gönderilemedi, ayarlar hatalı olabilir:", mailErr);
+            } else {
+                console.log("Sipariş bildirim e-postası başarıyla gönderildi: " + info.response);
+            }
+        });
+
+        // İşlem tamam: Müşteriyi sitenin sipariş başarılı sayfasına yönlendir (redirect).
+        res.redirect(frontendUrl + "/basarili");
     });
 });
 
